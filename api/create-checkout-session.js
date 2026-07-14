@@ -1,12 +1,15 @@
 /**
- * Vercel Serverless Function - Stripe Checkout Session létrehozása
+ * Vercel Serverless Function - Rendelés indítása (bankkártya vagy utánvét)
  * ────────────────────────────────────────────────────────────────────────
- * Ugyanazt csinálja, mint a Firebase Cloud Function verzió, csak Vercelen
- * fut - ehhez nem kell Firebase Blaze csomag / bankkártya megadása a
- * Google felé.
+ * Bankkártyás fizetésnél: Stripe Checkout Session-t hoz létre, és a session
+ * URL-jét adja vissza, amire a kliens átirányítja a vásárlót.
+ * Utánvétes fizetésnél: nincs Stripe-hívás, a rendelés azonnal
+ * "cod_confirmed" állapottal kerül mentésre, és egy egyszerű sikeres
+ * választ ad vissza (a kliens nem irányít át sehova).
  *
- * A rendelést a Firebase Admin SDK-n keresztül menti Firestore-ba (ez a
- * Firestore adatbázis maga ingyenes, Spark csomagon is elérhető).
+ * A rendelést mindkét esetben a Firebase Admin SDK-n keresztül menti
+ * Firestore-ba (ez a Firestore adatbázis maga ingyenes, Spark csomagon is
+ * elérhető).
  *
  * Szükséges környezeti változók (Vercel Project Settings → Environment Variables):
  *   STRIPE_SECRET_KEY        - a Stripe titkos kulcsod (sk_test_... vagy sk_live_...)
@@ -28,6 +31,21 @@ if (!admin.apps.length) {
 }
 const db = admin.firestore();
 
+// Csak ezekre a hétköznapokra engedünk szállítási napot (0=vasárnap...6=szombat; hétfő=1, szerda=3, péntek=5)
+const ALLOWED_DELIVERY_WEEKDAYS = [1, 3, 5];
+
+function isValidDeliveryDate(dateStr) {
+  if (!dateStr || typeof dateStr !== "string") return false;
+  const parts = dateStr.split("-").map(Number);
+  if (parts.length !== 3) return false;
+  const d = new Date(parts[0], parts[1] - 1, parts[2]);
+  if (isNaN(d.getTime())) return false;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  if (d.getTime() < today.getTime()) return false;
+  return ALLOWED_DELIVERY_WEEKDAYS.indexOf(d.getDay()) !== -1;
+}
+
 module.exports = async (req, res) => {
   // CORS - engedjük, hogy a webshop.html (bármelyik domainről) hívhassa
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -38,37 +56,56 @@ module.exports = async (req, res) => {
   if (req.method !== "POST") { res.status(405).json({ error: "Method not allowed" }); return; }
 
   try {
-    const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
-    const { customer, items, userId } = req.body || {};
+    const { customer, items, userId, paymentMethod, deliveryDate } = req.body || {};
 
     if (!customer || !customer.email || !Array.isArray(items) || items.length === 0) {
       res.status(400).json({ error: "Hiányzó vagy hibás adatok (customer/items)." });
       return;
     }
 
+    if (!isValidDeliveryDate(deliveryDate)) {
+      res.status(400).json({ error: "Érvénytelen szállítási nap. Csak hétfő, szerda vagy péntek választható, jövőbeli dátummal." });
+      return;
+    }
+
+    const isCod = paymentMethod === "cod";
+
     // Szerveroldali validáció - soha ne bízzunk meg vakon a böngészőből jövő árban.
     const line_items = items.map((it) => {
       const qty = Math.max(1, Math.floor(Number(it.qty) || 1));
       const unitPriceHUF = Math.max(0, Math.round(Number(it.unitPrice) || 0));
+      // FONTOS: a Stripe a legkisebb pénznem-egységben várja az összeget.
+      // HUF esetén ez nem maga a forint, hanem "fillér" (1 Ft = 100 egység
+      // a Stripe API szemszögéből) - ezért kell *100-zal szorozni.
       return {
         price_data: {
           currency: "huf",
           product_data: { name: `${it.name} (${it.unit})` },
-          unit_amount: unitPriceHUF*100,
+          unit_amount: unitPriceHUF * 100,
         },
         quantity: qty,
       };
     });
 
-    // Rendelés előzetes mentése Firestore-ba "pending" állapotban.
+    // Rendelés mentése Firestore-ba. Utánvétnél azonnal visszaigazolt
+    // állapotba kerül, bankkártyánál "pending"-ként várja a fizetést.
     const orderRef = await db.collection("orders").add({
       customer,
       items,
       userId: userId || null,
-      status: "pending",
+      paymentMethod: isCod ? "cod" : "card",
+      deliveryDate,
+      status: isCod ? "cod_confirmed" : "pending",
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
+    // Utánvét esetén nincs Stripe-hívás, azonnal visszajelzünk a kliensnek.
+    if (isCod) {
+      res.status(200).json({ success: true, orderId: orderRef.id });
+      return;
+    }
+
+    const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
     const successUrl = process.env.SUCCESS_URL || "https://example.com/webshop.html?payment=success";
     const cancelUrl = process.env.CANCEL_URL || "https://example.com/webshop.html?payment=cancelled";
 
@@ -87,6 +124,6 @@ module.exports = async (req, res) => {
     res.status(200).json({ url: session.url });
   } catch (err) {
     console.error("createCheckoutSession hiba:", err);
-    res.status(500).json({ error: "Belső szerverhiba a fizetés indításakor." });
+    res.status(500).json({ error: "Belső szerverhiba a rendelés indításakor." });
   }
 };
