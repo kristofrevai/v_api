@@ -63,6 +63,14 @@ module.exports = async (req, res) => {
       return;
     }
 
+    // A rendeléshez bejelentkezett fiók szükséges - ezt a kliens felület már
+    // eleve kikényszeríti, ez itt a szerveroldali dupla védelem közvetlen
+    // API-hívás esetére.
+    if (!userId || typeof userId !== "string") {
+      res.status(401).json({ error: "A rendelés leadásához bejelentkezés szükséges." });
+      return;
+    }
+
     if (!isValidDeliveryDate(deliveryDate)) {
       res.status(400).json({ error: "Érvénytelen szállítási nap. Csak hétfő, szerda vagy péntek választható, jövőbeli dátummal." });
       return;
