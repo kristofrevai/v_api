@@ -1,7 +1,7 @@
 {
   "name": "revai-webshop-payment-api",
-  "version": "1.0.0",
-  "description": "Stripe fizetési backend a Révai Fruit Kft. webshophoz, Vercel Serverless Functions-ön",
+  "version": "2.1.0",
+  "description": "Stripe + utánvét fizetési backend, e-mail értesítéssel, a Révai Fruit Kft. webshophoz, Vercel Serverless Functions-ön",
   "private": true,
   "dependencies": {
     "stripe": "^16.2.0",
