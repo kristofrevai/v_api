@@ -4,8 +4,8 @@
   "description": "Stripe + utánvét fizetési backend, e-mail értesítéssel (XLSX melléklettel), a Révai Fruit Kft. webshophoz, Vercel Serverless Functions-ön",
   "private": true,
   "dependencies": {
-    "exceljs": "^4.4.0",
+    "stripe": "^16.2.0",
     "firebase-admin": "^12.1.0",
-    "stripe": "^16.2.0"
+    "exceljs": "^4.4.0"
   }
 }
