@@ -2,7 +2,8 @@
  * Vercel Serverless Function - Stripe webhook fogadása
  * ────────────────────────────────────────────────────────────────────────
  * A Stripe ide küldi a "checkout.session.completed" eseményt sikeres
- * fizetéskor, mi pedig a Firestore-ban lévő rendelést "paid"-re állítjuk.
+ * fizetéskor, mi pedig a Firestore-ban lévő rendelést "paid"-re állítjuk,
+ * és e-mail értesítést küldünk a boltvezetőnek.
  *
  * FONTOS: a Stripe aláírás-ellenőrzéshez a NYERS (raw) request body kell,
  * ezért kikapcsoljuk a Vercel alapértelmezett body parsolását.
@@ -10,6 +11,7 @@
 
 const Stripe = require("stripe");
 const admin = require("firebase-admin");
+const { sendOrderNotificationEmail } = require("../lib/email");
 
 if (!admin.apps.length) {
   const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
@@ -56,11 +58,26 @@ module.exports = async (req, res) => {
     const orderId = session.metadata && session.metadata.orderId;
     if (orderId) {
       try {
-        await db.collection("orders").doc(orderId).update({
+        const orderDocRef = db.collection("orders").doc(orderId);
+        const existingSnap = await orderDocRef.get();
+        const wasAlreadyPaid = existingSnap.exists && existingSnap.data().status === "paid";
+
+        await orderDocRef.update({
           status: "paid",
           paidAt: admin.firestore.FieldValue.serverTimestamp(),
           stripePaymentIntent: session.payment_intent || null,
         });
+
+        // Csak akkor küldünk értesítő e-mailt, ha most vált "paid" állapotúvá
+        // (nem korábban) - így egy esetleges ismételt webhook-küldés nem
+        // eredményez duplikált e-mailt.
+        if (!wasAlreadyPaid && existingSnap.exists) {
+          try {
+            await sendOrderNotificationEmail(existingSnap.data(), orderId);
+          } catch (emailErr) {
+            console.error("Rendelés-értesítő e-mail hiba (bankkártya):", emailErr);
+          }
+        }
       } catch (err) {
         console.error("Rendelés frissítési hiba:", err);
       }
