@@ -1,28 +1,25 @@
 /**
- * Vercel Serverless Function - Rendelés indítása (bankkártya vagy utánvét)
+ * Vercel Serverless Function - Rendelés indítása (Stripe bankkártya, vagy utánvét)
  * ────────────────────────────────────────────────────────────────────────
  * Bankkártyás fizetésnél: Stripe Checkout Session-t hoz létre, és a session
  * URL-jét adja vissza, amire a kliens átirányítja a vásárlót.
  * Utánvétes fizetésnél: nincs Stripe-hívás, a rendelés azonnal
- * "cod_confirmed" állapottal kerül mentésre, és egy egyszerű sikeres
- * választ ad vissza (a kliens nem irányít át sehova).
- *
- * A rendelést mindkét esetben a Firebase Admin SDK-n keresztül menti
- * Firestore-ba (ez a Firestore adatbázis maga ingyenes, Spark csomagon is
- * elérhető).
+ * "cod_confirmed" állapottal kerül mentésre, és e-mail értesítés megy a
+ * boltvezetőnek.
  *
  * Szükséges környezeti változók (Vercel Project Settings → Environment Variables):
  *   STRIPE_SECRET_KEY        - a Stripe titkos kulcsod (sk_test_... vagy sk_live_...)
  *   FIREBASE_SERVICE_ACCOUNT - a Firebase service account JSON kulcs, EGY SORBAN
- *                              (lásd SETUP_GUIDE.md a beszerzéséhez)
  *   SUCCESS_URL               - pl. https://revaifruitkft.hu/webshop.html?payment=success
  *   CANCEL_URL                - pl. https://revaifruitkft.hu/webshop.html?payment=cancelled
+ *   RESEND_API_KEY            - rendelés-értesítő e-mailhez (lásd lib/email.js)
+ *   NOTIFY_EMAIL              - ide érkeznek az értesítések
  */
 
 const Stripe = require("stripe");
 const admin = require("firebase-admin");
+const { sendOrderNotificationEmail } = require("../lib/email");
 
-// Firebase Admin csak egyszer inicializálódjon (Vercel újrahasznosíthatja a folyamatot hívások között)
 if (!admin.apps.length) {
   const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
   admin.initializeApp({
@@ -96,7 +93,8 @@ module.exports = async (req, res) => {
     });
 
     // Rendelés mentése Firestore-ba. Utánvétnél azonnal visszaigazolt
-    // állapotba kerül, bankkártyánál "pending"-ként várja a fizetést.
+    // állapotba kerül, bankkártyánál "pending"-ként várja a Stripe
+    // visszaigazolását (webhook).
     const orderRef = await db.collection("orders").add({
       customer,
       items,
@@ -107,8 +105,18 @@ module.exports = async (req, res) => {
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
-    // Utánvét esetén nincs Stripe-hívás, azonnal visszajelzünk a kliensnek.
+    // Utánvét esetén nincs Stripe-hívás, azonnal visszajelzünk a kliensnek,
+    // és e-mailben is értesítjük a boltvezetőt az új rendelésről.
     if (isCod) {
+      try {
+        await sendOrderNotificationEmail(
+          { customer, items, paymentMethod: "cod", deliveryDate },
+          orderRef.id
+        );
+      } catch (emailErr) {
+        console.error("Rendelés-értesítő e-mail hiba (utánvét):", emailErr);
+        // Az e-mail hibája nem akadályozhatja meg a sikeres rendelés visszaigazolását.
+      }
       res.status(200).json({ success: true, orderId: orderRef.id });
       return;
     }
@@ -129,7 +137,7 @@ module.exports = async (req, res) => {
 
     await orderRef.update({ stripeSessionId: session.id });
 
-    res.status(200).json({ url: session.url });
+    res.status(200).json({ url: session.url, orderId: orderRef.id });
   } catch (err) {
     console.error("createCheckoutSession hiba:", err);
     res.status(500).json({ error: "Belső szerverhiba a rendelés indításakor." });
