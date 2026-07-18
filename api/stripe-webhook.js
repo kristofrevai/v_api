@@ -5,13 +5,16 @@
  * fizetéskor, mi pedig a Firestore-ban lévő rendelést "paid"-re állítjuk,
  * és e-mail értesítést küldünk a boltvezetőnek.
  *
+ * MEGJEGYZÉS: az automatikus számlázás (Számlázz.hu) itt is szándékosan
+ * nincs bekötve - lásd a create-checkout-session.js hasonló megjegyzését.
+ *
  * FONTOS: a Stripe aláírás-ellenőrzéshez a NYERS (raw) request body kell,
  * ezért kikapcsoljuk a Vercel alapértelmezett body parsolását.
  */
 
 const Stripe = require("stripe");
 const admin = require("firebase-admin");
-const { sendOrderNotificationEmail } = require("../lib/email");
+const { sendOrderNotificationEmail, sendCustomerOrderConfirmationEmail } = require("../lib/email");
 
 if (!admin.apps.length) {
   const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
@@ -71,11 +74,21 @@ module.exports = async (req, res) => {
         // Csak akkor küldünk értesítő e-mailt, ha most vált "paid" állapotúvá
         // (nem korábban) - így egy esetleges ismételt webhook-küldés nem
         // eredményez duplikált e-mailt.
+        //
+        // FONTOS: az automatikus számlázás (Számlázz.hu) SZÁNDÉKOSAN ki van
+        // kapcsolva itt is - lásd a create-checkout-session.js hasonló
+        // megjegyzését (friss áru mérési eltérése miatt).
         if (!wasAlreadyPaid && existingSnap.exists) {
+          const orderData = existingSnap.data();
           try {
-            await sendOrderNotificationEmail(existingSnap.data(), orderId);
+            await sendOrderNotificationEmail(orderData, orderId);
           } catch (emailErr) {
             console.error("Rendelés-értesítő e-mail hiba (bankkártya):", emailErr);
+          }
+          try {
+            await sendCustomerOrderConfirmationEmail(orderData, orderId);
+          } catch (custEmailErr) {
+            console.error("Vásárlói visszaigazoló e-mail hiba (bankkártya):", custEmailErr);
           }
         }
       } catch (err) {
