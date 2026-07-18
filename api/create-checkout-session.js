@@ -7,6 +7,12 @@
  * "cod_confirmed" állapottal kerül mentésre, és e-mail értesítés megy a
  * boltvezetőnek.
  *
+ * MEGJEGYZÉS: az automatikus Számlázz.hu-integráció (lib/szamlazz.js) készen
+ * áll, de jelenleg SZÁNDÉKOSAN nincs bekötve - friss áru (zöldség/gyümölcs)
+ * rendelt és ténylegesen kiszállított/lemért mennyisége eltérhet, ezért a
+ * számlázásnak meg kell várnia a tényleges mennyiségek megerősítését (pl.
+ * egy admin felületről), nem indulhat el automatikusan a rendeléskor.
+ *
  * Szükséges környezeti változók (Vercel Project Settings → Environment Variables):
  *   STRIPE_SECRET_KEY        - a Stripe titkos kulcsod (sk_test_... vagy sk_live_...)
  *   FIREBASE_SERVICE_ACCOUNT - a Firebase service account JSON kulcs, EGY SORBAN
@@ -18,7 +24,7 @@
 
 const Stripe = require("stripe");
 const admin = require("firebase-admin");
-const { sendOrderNotificationEmail } = require("../lib/email");
+const { sendOrderNotificationEmail, sendCustomerOrderConfirmationEmail } = require("../lib/email");
 
 if (!admin.apps.length) {
   const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
@@ -53,7 +59,7 @@ module.exports = async (req, res) => {
   if (req.method !== "POST") { res.status(405).json({ error: "Method not allowed" }); return; }
 
   try {
-    const { customer, items, userId, paymentMethod, deliveryDate } = req.body || {};
+    const { customer, invoice, items, userId, paymentMethod, deliveryDate } = req.body || {};
 
     if (!customer || !customer.email || !Array.isArray(items) || items.length === 0) {
       res.status(400).json({ error: "Hiányzó vagy hibás adatok (customer/items)." });
@@ -97,6 +103,7 @@ module.exports = async (req, res) => {
     // visszaigazolását (webhook).
     const orderRef = await db.collection("orders").add({
       customer,
+      invoice: invoice || null,
       items,
       userId: userId || null,
       paymentMethod: isCod ? "cod" : "card",
@@ -106,16 +113,26 @@ module.exports = async (req, res) => {
     });
 
     // Utánvét esetén nincs Stripe-hívás, azonnal visszajelzünk a kliensnek,
-    // és e-mailben is értesítjük a boltvezetőt az új rendelésről.
+    // és e-mailben értesítjük a boltvezetőt.
+    //
+    // FONTOS: az automatikus számlázás (Számlázz.hu) SZÁNDÉKOSAN ki van
+    // kapcsolva itt. A friss zöldség/gyümölcs rendelt mennyisége (pl. "1 kg")
+    // gyakran eltér a ténylegesen lemért, kiszállított mennyiségtől, a
+    // számlának viszont a valós mennyiséget kell tükröznie. A lib/szamlazz.js
+    // kód megmarad, és később, egy admin felületről (a tényleges lemért
+    // mennyiségek megerősítése után) újra bekapcsolható lesz.
     if (isCod) {
+      const codOrderData = { customer, invoice: invoice || null, items, userId: userId || null, paymentMethod: "cod", deliveryDate };
       try {
-        await sendOrderNotificationEmail(
-          { customer, items, paymentMethod: "cod", deliveryDate },
-          orderRef.id
-        );
+        await sendOrderNotificationEmail(codOrderData, orderRef.id);
       } catch (emailErr) {
         console.error("Rendelés-értesítő e-mail hiba (utánvét):", emailErr);
         // Az e-mail hibája nem akadályozhatja meg a sikeres rendelés visszaigazolását.
+      }
+      try {
+        await sendCustomerOrderConfirmationEmail(codOrderData, orderRef.id);
+      } catch (custEmailErr) {
+        console.error("Vásárlói visszaigazoló e-mail hiba (utánvét):", custEmailErr);
       }
       res.status(200).json({ success: true, orderId: orderRef.id });
       return;
