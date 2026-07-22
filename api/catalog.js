@@ -14,8 +14,6 @@ module.exports = async (req, res) => {
   if (req.method === "OPTIONS") { res.status(204).end(); return; }
   if (req.method !== "GET") { res.status(405).json({ error: "Method not allowed" }); return; }
 
-  // Rövid cache-elés (5 perc) - a katalógus nem változik másodpercenként,
-  // ezzel csökkentjük a felesleges terhelést.
-  res.setHeader("Cache-Control", "public, max-age=300, s-maxage=300");
+  res.setHeader("Cache-Control", "no-store");
   res.status(200).json({ catalog: CATALOG });
 };
