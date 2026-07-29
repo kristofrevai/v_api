@@ -1,5 +1,3 @@
-
-
 const Stripe = require("stripe");
 const admin = require("firebase-admin");
 const { sendOrderNotificationEmail, sendCustomerOrderConfirmationEmail } = require("../lib/email");
@@ -146,6 +144,32 @@ module.exports = async (req, res) => {
       return;
     }
 
+    // ─── 1.5) Fiók típusának lekérdezése a SAJÁT (szerveroldali) adatbázisból ───
+    // A fizetési mód (kártya/utánvét/utalásos számla) NEM a kliens állítása
+    // alapján dől el, hanem a Firestore-ban tárolt, tényleges fiók típusa
+    // szerint - így egy magánszemély fiók nem tud "utalásos számlát"
+    // választani a kliensoldali UI megkerülésével, és fordítva.
+    let accountType = null;
+    try {
+      const userDoc = await db.collection("users").doc(userId).get();
+      if (userDoc.exists) accountType = userDoc.data().accountType || null;
+    } catch (userDocErr) {
+      console.error("Felhasználói fiók adatainak lekérdezési hiba:", userDocErr);
+    }
+
+    let effectivePaymentMethod;
+    if (accountType === "company") {
+      // Céges fiókoknál kizárólag utalásos számla választható, függetlenül
+      // attól, hogy a kliens mit küldött.
+      effectivePaymentMethod = "bank_transfer";
+    } else {
+      if (paymentMethod === "bank_transfer") {
+        res.status(400).json({ error: "Az utalásos számla fizetési mód kizárólag céges fiókok számára elérhető." });
+        return;
+      }
+      effectivePaymentMethod = paymentMethod === "cod" ? "cod" : "card";
+    }
+
     // ─── 2) Tételek és árak kizárólag a szerveroldali katalógusból ───
     const trusted = buildTrustedLineItems(items);
     if (trusted.error) {
@@ -160,7 +184,8 @@ module.exports = async (req, res) => {
       return;
     }
 
-    const isCod = paymentMethod === "cod";
+    const isCod = effectivePaymentMethod === "cod";
+    const isBankTransfer = effectivePaymentMethod === "bank_transfer";
 
     // Stripe line_items a megbízható, szerveroldali árak alapján.
     const stripeLineItems = lineItems.map((it) => ({
@@ -174,39 +199,44 @@ module.exports = async (req, res) => {
       quantity: it.qty,
     }));
 
-    // Rendelés mentése Firestore-ba. Utánvétnél azonnal visszaigazolt
-    // állapotba kerül, bankkártyánál "pending"-ként várja a Stripe
-    // visszaigazolását (webhook).
+    // Rendelés mentése Firestore-ba.
+    // - Utánvétnél azonnal visszaigazolt állapotba kerül.
+    // - Utalásos számlánál (céges fiók) "bank_transfer_pending" állapotba
+    //   kerül - a számlázás csak a tényleges, kiszállított mennyiség admin
+    //   általi megerősítése után indul (lásd lentebb).
+    // - Bankkártyánál "pending"-ként várja a Stripe visszaigazolását (webhook).
     const orderRef = await db.collection("orders").add({
       customer,
       invoice: invoice || null,
       items: lineItems,
       userId,
-      paymentMethod: isCod ? "cod" : "card",
+      paymentMethod: effectivePaymentMethod,
       deliveryDate,
       grossTotal,
-      status: isCod ? "cod_confirmed" : "pending",
+      status: isCod ? "cod_confirmed" : (isBankTransfer ? "bank_transfer_pending" : "pending"),
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
-    // Utánvét esetén nincs Stripe-hívás, azonnal visszajelzünk a kliensnek,
-    // és e-mailben értesítjük a boltvezetőt.
+    // Utánvét és utalásos számla esetén nincs Stripe-hívás, azonnal
+    // visszajelzünk a kliensnek, és e-mailben értesítjük a boltvezetőt.
     //
     // FONTOS: az automatikus számlázás (Számlázz.hu) SZÁNDÉKOSAN ki van
-    // kapcsolva itt. A friss zöldség/gyümölcs rendelt mennyisége (pl. "1 kg")
-    // gyakran eltér a ténylegesen lemért, kiszállított mennyiségtől, a
-    // számlának viszont a valós mennyiséget kell tükröznie.
-    if (isCod) {
-      const codOrderData = { customer, invoice: invoice || null, items: lineItems, userId, paymentMethod: "cod", deliveryDate };
+    // kapcsolva mindhárom fizetési módnál (kártya, utánvét, utalásos számla).
+    // A friss zöldség/gyümölcs rendelt mennyisége (pl. "1 kg") gyakran eltér
+    // a ténylegesen lemért, kiszállított mennyiségtől, a számlának viszont a
+    // valós mennyiséget kell tükröznie - ezért a számlázás minden esetben
+    // egy admin felületről történő, valós mennyiség-megerősítésre vár.
+    if (isCod || isBankTransfer) {
+      const offlineOrderData = { customer, invoice: invoice || null, items: lineItems, userId, paymentMethod: effectivePaymentMethod, deliveryDate };
       try {
-        await sendOrderNotificationEmail(codOrderData, orderRef.id);
+        await sendOrderNotificationEmail(offlineOrderData, orderRef.id);
       } catch (emailErr) {
-        console.error("Rendelés-értesítő e-mail hiba (utánvét):", emailErr);
+        console.error("Rendelés-értesítő e-mail hiba (utánvét/utalás):", emailErr);
       }
       try {
-        await sendCustomerOrderConfirmationEmail(codOrderData, orderRef.id);
+        await sendCustomerOrderConfirmationEmail(offlineOrderData, orderRef.id);
       } catch (custEmailErr) {
-        console.error("Vásárlói visszaigazoló e-mail hiba (utánvét):", custEmailErr);
+        console.error("Vásárlói visszaigazoló e-mail hiba (utánvét/utalás):", custEmailErr);
       }
       res.status(200).json({ success: true, orderId: orderRef.id });
       return;
