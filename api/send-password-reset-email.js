@@ -33,12 +33,19 @@
  */
 const admin = require("firebase-admin");
 const { sendPasswordResetEmailCustom } = require("../lib/email");
+const { applyCors, checkAndSetEmailCooldown } = require("../lib/security");
 if (!admin.apps.length) {
   const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
   admin.initializeApp({
     credential: admin.credential.cert(serviceAccount),
   });
 }
+const db = admin.firestore();
+
+// Ugyanarra az e-mail címre max. ennyi másodpercenként küldünk jelszó-
+// visszaállító e-mailt - ez akadályozza meg, hogy valaki ezt a végpontot
+// közvetlenül hívogatva tömegesen spam-elje ugyanazt a postaládát.
+const COOLDOWN_SECONDS = 60;
 
 // A saját, márkázott jelszó-visszaállító oldalunk - lásd reset-password.html.
 // FONTOS: ennek pontosan meg kell egyeznie azzal az elérési úttal, ahova a
@@ -62,9 +69,7 @@ function buildDirectResetLink(firebaseGeneratedLink) {
 }
 
 module.exports = async (req, res) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  applyCors(req, res);
   if (req.method === "OPTIONS") { res.status(204).end(); return; }
   if (req.method !== "POST") { res.status(405).json({ error: "Method not allowed" }); return; }
   try {
@@ -74,9 +79,15 @@ module.exports = async (req, res) => {
       return;
     }
     try {
-      const firebaseGeneratedLink = await admin.auth().generatePasswordResetLink(email);
-      const resetLink = buildDirectResetLink(firebaseGeneratedLink);
-      await sendPasswordResetEmailCustom(email, resetLink);
+      const canSend = await checkAndSetEmailCooldown(db, "reset", email, COOLDOWN_SECONDS);
+      if (canSend) {
+        const firebaseGeneratedLink = await admin.auth().generatePasswordResetLink(email);
+        const resetLink = buildDirectResetLink(firebaseGeneratedLink);
+        await sendPasswordResetEmailCustom(email, resetLink);
+      }
+      // Ha a cooldown miatt nem küldtünk, szándékosan nem teszünk semmit -
+      // a kliens felé ekkor is sikeres választ adunk, hogy ne áruljunk el
+      // semmit arról, hogy épp túl sokszor kérték.
     } catch (err) {
       // "user-not-found" esetén is sikeres választ adunk (account enumeration elleni védelem) -
       // egyéb hibákat logolunk, de a válaszunk kifelé ekkor is semleges marad.
