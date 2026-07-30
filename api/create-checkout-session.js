@@ -2,6 +2,7 @@ const Stripe = require("stripe");
 const admin = require("firebase-admin");
 const { sendOrderNotificationEmail, sendCustomerOrderConfirmationEmail } = require("../lib/email");
 const { getVatRate, findItem } = require("../lib/catalog");
+const { applyCors } = require("../lib/security");
 
 if (!admin.apps.length) {
   const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
@@ -105,9 +106,7 @@ function buildTrustedLineItems(rawItems) {
 
 module.exports = async (req, res) => {
   // CORS - engedjük, hogy a webshop.html (bármelyik domainről) hívhassa
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  applyCors(req, res);
 
   if (req.method === "OPTIONS") { res.status(204).end(); return; }
   if (req.method !== "POST") { res.status(405).json({ error: "Method not allowed" }); return; }
