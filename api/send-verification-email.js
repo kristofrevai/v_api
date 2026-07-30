@@ -30,12 +30,19 @@
  */
 const admin = require("firebase-admin");
 const { sendVerificationEmailCustom } = require("../lib/email");
+const { applyCors, checkAndSetEmailCooldown } = require("../lib/security");
 if (!admin.apps.length) {
   const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
   admin.initializeApp({
     credential: admin.credential.cert(serviceAccount),
   });
 }
+const db = admin.firestore();
+
+// Ugyanarra az e-mail címre max. ennyi másodpercenként küldünk megerősítő
+// e-mailt - ez akadályozza meg, hogy valaki ezt a végpontot közvetlenül
+// hívogatva tömegesen spam-elje ugyanazt a postaládát.
+const COOLDOWN_SECONDS = 60;
 
 // A saját, márkázott megerősítő oldalunk - lásd verify-email.html.
 // FONTOS: ennek pontosan meg kell egyeznie azzal az elérési úttal, ahova a
@@ -59,9 +66,7 @@ function buildDirectVerifyLink(firebaseGeneratedLink) {
 }
 
 module.exports = async (req, res) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  applyCors(req, res);
   if (req.method === "OPTIONS") { res.status(204).end(); return; }
   if (req.method !== "POST") { res.status(405).json({ error: "Method not allowed" }); return; }
   try {
@@ -71,9 +76,15 @@ module.exports = async (req, res) => {
       return;
     }
     try {
-      const firebaseGeneratedLink = await admin.auth().generateEmailVerificationLink(email);
-      const verifyLink = buildDirectVerifyLink(firebaseGeneratedLink);
-      await sendVerificationEmailCustom(email, verifyLink);
+      const canSend = await checkAndSetEmailCooldown(db, "verify", email, COOLDOWN_SECONDS);
+      if (canSend) {
+        const firebaseGeneratedLink = await admin.auth().generateEmailVerificationLink(email);
+        const verifyLink = buildDirectVerifyLink(firebaseGeneratedLink);
+        await sendVerificationEmailCustom(email, verifyLink);
+      }
+      // Ha a cooldown miatt nem küldtünk (canSend === false), szándékosan
+      // nem teszünk semmit, és a kliens felé ekkor is sikeres választ adunk
+      // - így nem árulunk el semmit arról, hogy épp túl sokszor kérték.
     } catch (err) {
       console.error("Megerősítő link generálási hiba:", err);
       // Nem áruljuk el kifelé a pontos hibát (pl. hogy nincs ilyen felhasználó) - mindig semleges választ adunk.
