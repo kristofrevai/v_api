@@ -6,10 +6,18 @@
  * Admin SDK-val generáljuk a valódi megerősítő linket, majd a saját,
  * márkázott sablonunkkal, a Resend-en keresztül küldjük ki.
  *
- * A megerősítő link a saját, márkázott verify-email.html oldalunkra mutat
- * (handleCodeInApp: true), NEM a Firebase alapértelmezett, generikus
- * action-handler oldalára - a tényleges megerősítést (applyActionCode) a
- * verify-email.html végzi el, kliensoldalon.
+ * FONTOS - miért NEM a handleCodeInApp-ot használjuk:
+ * Az admin.auth().generateEmailVerificationLink() "verifyEmail" módnál a
+ * gyakorlatban (Firebase-oldali sajátosság) sokszor NEM ugorja át a saját,
+ * generikus, firebaseapp.com/__/auth/action hosted oldalát, még
+ * actionCodeSettings.handleCodeInApp:true mellett sem - helyette ott egy
+ * "Tovább" linket ad a continueUrl-re. Emiatt ehelyett a megbízhatóbb
+ * megoldást alkalmazzuk: a Firebase által generált linkből KINYERJÜK az
+ * "oobCode"-ot, és ezzel MAGUNK építünk egy linket, ami közvetlenül a saját
+ * verify-email.html oldalunkra mutat. A verify-email.html a kliensoldali
+ * Firebase SDK-val (auth.applyActionCode(oobCode)) végzi el ténylegesen a
+ * megerősítést - így a Firebase hosted oldala sosem jelenik meg, és nincs
+ * szükség az "Authorized domains" listára sem ehhez a folyamathoz.
  *
  * Szükséges környezeti változók:
  *   FIREBASE_SERVICE_ACCOUNT - a Firebase service account JSON kulcs, EGY SORBAN
@@ -18,9 +26,7 @@
  *
  * FONTOS: a verify-email.html-t ki kell tenni a
  * https://revaifruitkft.hu/web/verify-email.html elérési útra (jelenleg egy
- * "web" nevű mappába), ÉS a revaifruitkft.hu domaint fel kell venni a
- * Firebase Console → Authentication → Settings → Authorized domains
- * listájába (különben a link generálása vagy a beváltása hibát fog adni).
+ * "web" nevű mappába).
  */
 const admin = require("firebase-admin");
 const { sendVerificationEmailCustom } = require("../lib/email");
@@ -36,6 +42,22 @@ if (!admin.apps.length) {
 // verify-email.html ténylegesen fel van töltve a revaifruitkft.hu domainen.
 const VERIFY_EMAIL_ACTION_URL = "https://revaifruitkft.hu/web/verify-email.html";
 
+// A Firebase által generált linkből (pl.
+// https://xxx.firebaseapp.com/__/auth/action?mode=verifyEmail&oobCode=ABC123&...)
+// kinyeri az oobCode paramétert, és egy, a saját oldalunkra mutató, egyenes
+// linket épít belőle.
+function buildDirectVerifyLink(firebaseGeneratedLink) {
+  const parsed = new URL(firebaseGeneratedLink);
+  const oobCode = parsed.searchParams.get("oobCode");
+  if (!oobCode) {
+    throw new Error("Nem sikerült kinyerni az oobCode-ot a Firebase által generált linkből.");
+  }
+  const directUrl = new URL(VERIFY_EMAIL_ACTION_URL);
+  directUrl.searchParams.set("mode", "verifyEmail");
+  directUrl.searchParams.set("oobCode", oobCode);
+  return directUrl.toString();
+}
+
 module.exports = async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
@@ -49,11 +71,8 @@ module.exports = async (req, res) => {
       return;
     }
     try {
-      const actionCodeSettings = {
-        url: VERIFY_EMAIL_ACTION_URL,
-        handleCodeInApp: true,
-      };
-      const verifyLink = await admin.auth().generateEmailVerificationLink(email, actionCodeSettings);
+      const firebaseGeneratedLink = await admin.auth().generateEmailVerificationLink(email);
+      const verifyLink = buildDirectVerifyLink(firebaseGeneratedLink);
       await sendVerificationEmailCustom(email, verifyLink);
     } catch (err) {
       console.error("Megerősítő link generálási hiba:", err);
