@@ -3,6 +3,7 @@ const admin = require("firebase-admin");
 const { sendOrderNotificationEmail, sendCustomerOrderConfirmationEmail } = require("../lib/email");
 const { getVatRate, findItem } = require("../lib/catalog");
 const { applyCors } = require("../lib/security");
+const { isValidDeliveryDate } = require("../lib/delivery");
 
 if (!admin.apps.length) {
   const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
@@ -11,21 +12,6 @@ if (!admin.apps.length) {
   });
 }
 const db = admin.firestore();
-
-// Csak ezekre a hétköznapokra engedünk szállítási napot (0=vasárnap...6=szombat; hétfő=1, szerda=3, péntek=5)
-const ALLOWED_DELIVERY_WEEKDAYS = [1, 3, 5];
-
-function isValidDeliveryDate(dateStr) {
-  if (!dateStr || typeof dateStr !== "string") return false;
-  const parts = dateStr.split("-").map(Number);
-  if (parts.length !== 3) return false;
-  const d = new Date(parts[0], parts[1] - 1, parts[2]);
-  if (isNaN(d.getTime())) return false;
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  if (d.getTime() < today.getTime()) return false;
-  return ALLOWED_DELIVERY_WEEKDAYS.indexOf(d.getDay()) !== -1;
-}
 
 // Nettó árból bruttó ár, kerekítve a legközelebbi forintra - ugyanaz a logika, mint a kliensen.
 function toGross(netPrice, vatRate) {
@@ -139,7 +125,7 @@ module.exports = async (req, res) => {
     }
 
     if (!isValidDeliveryDate(deliveryDate)) {
-      res.status(400).json({ error: "Érvénytelen szállítási nap. Csak hétfő, szerda vagy péntek választható, jövőbeli dátummal." });
+      res.status(400).json({ error: "Érvénytelen szállítási nap, vagy a hozzá tartozó rendelési határidő (a szállítást megelőző nap 15:00) már lejárt. Kérjük, válasszon másik szállítási napot." });
       return;
     }
 
