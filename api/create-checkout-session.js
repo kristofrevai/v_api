@@ -125,7 +125,7 @@ module.exports = async (req, res) => {
     }
 
     if (!isValidDeliveryDate(deliveryDate)) {
-      res.status(400).json({ error: "Érvénytelen szállítási nap, vagy a hozzá tartozó rendelési határidő (a szállítást megelőző nap 15:00) már lejárt. Kérjük, válasszon másik szállítási napot." });
+      res.status(400).json({ error: "Érvénytelen szállítási nap, vagy a hozzá tartozó rendelési határidő (a szállítást megelőző nap 14:00) már lejárt. Kérjük, válasszon másik szállítási napot." });
       return;
     }
 
