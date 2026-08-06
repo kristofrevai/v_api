@@ -109,13 +109,33 @@ module.exports = async (req, res) => {
 
     let decodedToken;
     try {
-      decodedToken = await admin.auth().verifyIdToken(idToken);
+      // FONTOS: checkRevoked=true - így egy kijelentkeztetett/visszavont
+      // munkamenettel (pl. amit a webshop.html a nem-megerősített
+      // bejelentkezési kísérlet után explicit kijelentkeztet) nem lehet
+      // tovább élő ID tokent felhasználni ez ellen a végpont ellen.
+      decodedToken = await admin.auth().verifyIdToken(idToken, true);
     } catch (tokenErr) {
       console.error("ID token ellenőrzési hiba:", tokenErr);
       res.status(401).json({ error: "A bejelentkezés lejárt vagy érvénytelen. Kérjük, jelentkezzen be újra." });
       return;
     }
     const userId = decodedToken.uid;
+
+    // ─── 1.4) E-mail cím megerősítésének ellenőrzése ───
+    // A Firebase ID token tartalmazza az "email_verified" claim-et, ami a
+    // szerveren, a tényleges Auth-rekord alapján van beállítva - ezt NEM
+    // lehet a kliensről meghamisítani (ellentétben azzal, ha csak a
+    // böngészőben futó `currentUser.emailVerified` mezőre hagyatkoznánk).
+    // Ez a VALÓDI, megkerülhetetlen kapu: megerősítés nélkül itt a
+    // rendelés nem indulhat el, függetlenül attól, hogy a felhasználó
+    // esetleg közvetlenül hívja ezt a végpontot a kliensoldali UI
+    // megkerülésével.
+    if (!decodedToken.email_verified) {
+      res.status(403).json({
+        error: "A rendelés leadásához előbb erősítse meg az e-mail címét. Kérjük, kattintson a kiküldött megerősítő linkre (nézze meg a spam mappát is), majd jelentkezzen be újra."
+      });
+      return;
+    }
 
     const { customer, invoice, items, paymentMethod, deliveryDate } = req.body || {};
 
