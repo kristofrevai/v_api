@@ -110,9 +110,8 @@ module.exports = async (req, res) => {
     let decodedToken;
     try {
       // FONTOS: checkRevoked=true - így egy kijelentkeztetett/visszavont
-      // munkamenettel (pl. amit a webshop.html a nem-megerősített
-      // bejelentkezési kísérlet után explicit kijelentkeztet) nem lehet
-      // tovább élő ID tokent felhasználni ez ellen a végpont ellen.
+      // munkamenettel nem lehet tovább élő ID tokent felhasználni ez ellen
+      // a végpont ellen.
       decodedToken = await admin.auth().verifyIdToken(idToken, true);
     } catch (tokenErr) {
       console.error("ID token ellenőrzési hiba:", tokenErr);
@@ -121,18 +120,36 @@ module.exports = async (req, res) => {
     }
     const userId = decodedToken.uid;
 
-    // ─── 1.4) E-mail cím megerősítésének ellenőrzése ───
-    // A Firebase ID token tartalmazza az "email_verified" claim-et, ami a
-    // szerveren, a tényleges Auth-rekord alapján van beállítva - ezt NEM
-    // lehet a kliensről meghamisítani (ellentétben azzal, ha csak a
-    // böngészőben futó `currentUser.emailVerified` mezőre hagyatkoznánk).
-    // Ez a VALÓDI, megkerülhetetlen kapu: megerősítés nélkül itt a
-    // rendelés nem indulhat el, függetlenül attól, hogy a felhasználó
-    // esetleg közvetlenül hívja ezt a végpontot a kliensoldali UI
-    // megkerülésével.
-    if (!decodedToken.email_verified) {
+    // ─── 1.4) Fiók lekérdezése a SAJÁT (szerveroldali) adatbázisból: jóváhagyási
+    // állapot ÉS fiók típusa egy helyen ───
+    // FONTOS: ez a VALÓDI, megkerülhetetlen kapu a rendelés leadásához. A
+    // Firestore-ban tárolt `status` mezőt a kliens (lásd a Firestore
+    // Security Rules-t) SOSEM tudja saját magának 'approved'-ra írni - azt
+    // kizárólag az api/approve-user.js végpont állíthatja be, Admin SDK-val.
+    // Ez azt jelenti, hogy akkor is biztosan jóváhagyott fiók kell a
+    // rendeléshez, ha valaki közvetlenül hívná ezt a végpontot, a
+    // kliensoldali UI-t megkerülve.
+    //
+    // KORÁBBAN itt az e-mail cím megerősítését (decodedToken.email_verified)
+    // ellenőriztük - ezt a jóváhagyás-alapú fiókrendszer bevezetésével ez a
+    // `status === 'approved'` ellenőrzés váltja fel, mert a regisztráció
+    // után a kliensen már nincs kötelező e-mail-megerősítési lépés.
+    let accountType = null;
+    let accountStatus = null;
+    try {
+      const userDoc = await db.collection("users").doc(userId).get();
+      if (userDoc.exists) {
+        const userData = userDoc.data();
+        accountType = userData.accountType || null;
+        accountStatus = userData.status || null;
+      }
+    } catch (userDocErr) {
+      console.error("Felhasználói fiók adatainak lekérdezési hiba:", userDocErr);
+    }
+
+    if (accountStatus !== "approved") {
       res.status(403).json({
-        error: "A rendelés leadásához előbb erősítse meg az e-mail címét. Kérjük, kattintson a kiküldött megerősítő linkre (nézze meg a spam mappát is), majd jelentkezzen be újra."
+        error: "A fiókja még jóváhagyásra vár. Miután munkatársunk jóváhagyta (erről e-mailben értesítjük), tud majd rendelést leadni."
       });
       return;
     }
@@ -149,19 +166,10 @@ module.exports = async (req, res) => {
       return;
     }
 
-    // ─── 1.5) Fiók típusának lekérdezése a SAJÁT (szerveroldali) adatbázisból ───
     // A fizetési mód (kártya/utánvét/utalásos számla) NEM a kliens állítása
     // alapján dől el, hanem a Firestore-ban tárolt, tényleges fiók típusa
-    // szerint - így egy magánszemély fiók nem tud "utalásos számlát"
-    // választani a kliensoldali UI megkerülésével, és fordítva.
-    let accountType = null;
-    try {
-      const userDoc = await db.collection("users").doc(userId).get();
-      if (userDoc.exists) accountType = userDoc.data().accountType || null;
-    } catch (userDocErr) {
-      console.error("Felhasználói fiók adatainak lekérdezési hiba:", userDocErr);
-    }
-
+    // szerint (lásd fent) - így egy magánszemély fiók nem tud "utalásos
+    // számlát" választani a kliensoldali UI megkerülésével, és fordítva.
     let effectivePaymentMethod;
     if (accountType === "company") {
       // Céges fiókoknál kizárólag utalásos számla választható, függetlenül
