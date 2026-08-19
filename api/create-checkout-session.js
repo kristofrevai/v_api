@@ -191,12 +191,6 @@ module.exports = async (req, res) => {
     }
     const { lineItems, grossTotal } = trusted;
 
-    const MIN_ORDER_TOTAL = 20000;
-    if (grossTotal < MIN_ORDER_TOTAL) {
-      res.status(400).json({ error: "A minimumrendelési érték 20 000 Ft (bruttó)." });
-      return;
-    }
-
     const isCod = effectivePaymentMethod === "cod";
     const isBankTransfer = effectivePaymentMethod === "bank_transfer";
 
