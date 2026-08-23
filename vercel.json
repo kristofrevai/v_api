@@ -1,5 +1,0 @@
-{
-  "redirects": [
-    { "source": "/termeklista", "destination": "/webshop/", "permanent": true }
-  ]
-}
